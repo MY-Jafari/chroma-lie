@@ -293,9 +293,14 @@ class Level:
         """Check all collisions for the player.
         Returns: "death", "exit", or "none"
         """
-        # Check tiles
+        # Fall off the screen / kill plane check
+        if player_rect.top > SCREEN_HEIGHT + 50:
+            return "death"
+
+        # Check tiles (use an expanded rect downwards to catch standing/touching contacts)
+        check_rect = player_rect.inflate(0, 4)
         for tile in self.tiles:
-            if tile.active and player_rect.colliderect(tile.rect):
+            if tile.active and check_rect.colliderect(tile.rect):
                 if tile.is_dangerous():
                     return "death"
 

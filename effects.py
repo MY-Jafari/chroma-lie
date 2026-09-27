@@ -217,6 +217,14 @@ class GlitchManager:
     def is_active(self):
         return self.glitch_time > 0
 
+    def get_glitch_offset(self):
+        """Get current chromatic aberration offset for camera rendering."""
+        if not self.is_active() or self.total_duration <= 0:
+            return (0, 0)
+        factor = self.glitch_time / self.total_duration
+        offset = int(self.intensity * factor * math.sin(self.glitch_time * 50))
+        return (offset, 0)
+
     def apply_to_surface(self, target_surface):
         """Applies chromatic aberration and slice glitches directly to surface."""
         # 1. Slice horizontal displacement

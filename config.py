@@ -25,16 +25,23 @@ YELLOW_TILE = (255, 220, 60)
 
 # Player physics
 PLAYER_SIZE = 28
-PLAYER_SPEED = 350.0          # pixels per second
-PLAYER_JUMP_FORCE = -550.0    # negative = up
+PLAYER_SPEED = 360.0          # pixels per second
+PLAYER_JUMP_FORCE = -600.0    # generous jump height (~150px max jump)
 GRAVITY = 1200.0
 FRICTION = 0.85
+MAX_FALL_SPEED = 900.0
+GROUND_PROBE = 4              # px below the feet used to detect standing ground
+COYOTE_TIME = 0.12            # grace period after falling to still jump
+JUMP_BUFFER_TIME = 0.12       # remember jump press right before landing
 DASH_SPEED = 800.0
 DASH_DURATION = 0.15
-DASH_COOLDOWN = 1.0
+DASH_COOLDOWN = 0.8
 
 # Tile settings
 TILE_SIZE = 40
+
+# Falling off the bottom of the level is fatal
+KILL_PLANE_Y = 1000
 
 # Glitch effect settings
 GLITCH_DURATION = 0.4         # seconds
@@ -46,6 +53,7 @@ CAMERA_SHAKE_INTENSITY = 6
 DEATH_PARTICLE_COUNT = 30
 DEATH_PARTICLE_LIFETIME = 0.8
 LEVEL_TRANSITION_DELAY = 0.5
+DEATH_RESPAWN_DELAY = 0.7  # seconds of death animation before respawn
 
 # Font settings
 FONT_SIZE_LARGE = 48

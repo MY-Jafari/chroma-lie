@@ -52,15 +52,16 @@ class DeceptionManager:
         """Apply a scripted rule change from level data."""
         change_type = change_data.get("type", "")
         reveal = change_data.get("reveal", "silent")
+        custom_msg = change_data.get("msg", None)
 
         if change_type == "swap_colors":
-            self._swap_color_meanings(reveal)
+            self._swap_color_meanings(reveal, custom_msg)
         elif change_type == "swap_controls":
-            self._swap_controls(reveal)
+            self._swap_controls(reveal, custom_msg)
         elif change_type == "hidden_rule":
-            self._activate_hidden_rule(change_data.get("rule"), reveal)
+            self._activate_hidden_rule(change_data.get("rule"), reveal, custom_msg)
         elif change_type == "glitch_text":
-            self._trigger_text_glitch(reveal)
+            self._trigger_text_glitch(reveal, custom_msg)
 
         self.change_history.append({
             "level": len(self.change_history) + 1,
@@ -68,48 +69,52 @@ class DeceptionManager:
             "reveal": reveal
         })
 
-    def _swap_color_meanings(self, reveal="silent"):
+    def _swap_color_meanings(self, reveal="silent", custom_msg=None):
         """Swap the meaning of red and blue tiles."""
         self.current_rules["red_meaning"], self.current_rules["blue_meaning"] = \
             self.current_rules["blue_meaning"], self.current_rules["red_meaning"]
-        self._trigger_glitch(reveal)
+        self._trigger_glitch(reveal, custom_msg)
 
-    def _swap_controls(self, reveal="silent"):
+    def _swap_controls(self, reveal="silent", custom_msg=None):
         """Swap left/right controls."""
         self.current_rules["controls_swapped"] = not self.current_rules["controls_swapped"]
-        self._trigger_glitch(reveal)
+        self._trigger_glitch(reveal, custom_msg)
 
-    def _activate_hidden_rule(self, rule_name, reveal="silent"):
+    def _activate_hidden_rule(self, rule_name, reveal="silent", custom_msg=None):
         """Activate a hidden rule."""
         self.current_rules["hidden_rule_active"] = rule_name
         self.current_rules["hidden_rule_params"] = {}
-        self._trigger_glitch(reveal)
+        self._trigger_glitch(reveal, custom_msg)
 
-    def _trigger_text_glitch(self, reveal="silent"):
+    def _trigger_text_glitch(self, reveal="silent", custom_msg=None):
         """Trigger a text glitch effect on the displayed rules."""
         self.displayed_rules["red_meaning"] = random.choice(["danger", "safe", "???", "lie"])
         self.displayed_rules["blue_meaning"] = random.choice(["safe", "danger", "???", "lie"])
-        self._trigger_glitch(reveal)
+        self._trigger_glitch(reveal, custom_msg)
 
-    def _trigger_glitch(self, reveal_type):
+    def _trigger_glitch(self, reveal_type, custom_msg=None):
         """Trigger visual glitch effect based on reveal type."""
         self.glitch_timer = GLITCH_DURATION
         self.glitch_active = True
 
         if reveal_type == "message":
-            messages = [
-                "Are you sure?",
-                "Rules still the same?",
-                "Trust your eyes?",
-                "Red means stop... or does it?",
-                "Memory is unreliable.",
-                "The display lies."
-            ]
-            self.message_text = random.choice(messages)
-            self.message_timer = 2.0
+            if custom_msg:
+                self.message_text = custom_msg
+            else:
+                messages = [
+                    "Are you sure?",
+                    "Rules still the same?",
+                    "Trust your eyes?",
+                    "Red means stop... or does it?",
+                    "Memory is unreliable.",
+                    "The display lies."
+                ]
+                self.message_text = random.choice(messages)
+            self.message_timer = 2.5
         elif reveal_type == "subtle":
-            # Just a brief visual hint
-            pass
+            # Subtle visual hint: flash the rule text area
+            self.message_text = "⚠"
+            self.message_timer = 0.8
 
     def maybe_random_change(self, level_id, probability=0.15):
         """Randomly apply a deception change (for later levels)."""

@@ -1,0 +1,73 @@
+name: Release (Windows .exe)
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  test:
+    name: Tests before packaging
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    env:
+      SDL_VIDEODRIVER: dummy
+      SDL_AUDIODRIVER: dummy
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run all tests
+        run: |
+          python tools/smoke_audio.py
+          python tools/smoke_game.py
+          python tools/screenshot.py
+          python tools/check_screenshot.py
+
+  build:
+    name: Build Windows .exe
+    needs: test
+    runs-on: windows-latest
+    permissions:
+      contents: write          # required to create the Release
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller==6.10.0
+
+      - name: Build single-window exe
+        run: >
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name ChromaLie
+          main.py
+
+      - name: Zip the build
+        run: Compress-Archive -Path dist/ChromaLie.exe -DestinationPath ChromaLie-windows-x64.zip
+        shell: pwsh
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ChromaLie-windows-x64.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true

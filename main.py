@@ -21,7 +21,10 @@ from effects import Effects, Background, scale_color
 from audio import Audio
 from ui import UI, Button
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False):                    # PyInstaller exe: save next to the .exe
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SAVE_PATH = os.path.join(BASE_DIR, SAVE_FILE)
 
 

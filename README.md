@@ -60,8 +60,25 @@ All audio is **synthesized in memory at start-up** — no asset files, no extra 
 | `audio.py` | in-memory synth: SFX, 7 death sounds, ambient drone |
 | `config.py` | all constants (incl. `SFX_VOLUME`, `AMBIENT_VOLUME`) |
 | `tools/screenshot.py` | regenerates `screenshot.png` headless |
+| `tools/smoke_audio.py` | headless audio test: synthesis, playback, mute, save round-trip |
+| `tools/smoke_game.py` | headless integration test of the real game loop |
 
 Adding a level = appending one dict to `LEVELS` in `levels_data.py` (legend at the top of that file).
+
+## CI/CD
+GitHub Actions runs everything automatically:
+* **CI** (`.github/workflows/ci.yml`) — on every push to `main` and every PR: compile check +
+  audio test + game-loop test + screenshot validation on a Windows/Ubuntu matrix (Python 3.10 &
+  3.12), plus a `pip-audit` dependency scan.
+* **Release** (`.github/workflows/release.yml`) — pushing a tag like `v1.0.0` runs the full test
+  suite, builds a windowed single-file Windows exe with PyInstaller, zips it and attaches it to a
+  GitHub Release with auto-generated notes.
+
+To cut a release:
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
 
 ---
 
@@ -123,6 +140,23 @@ python main.py
 | `audio.py` | سنتز درون‌حافظه‌ای: افکت‌ها، ۷ صدای مرگ، دران امبیانت |
 | `config.py` | همه‌ی ثابت‌ها (شامل `SFX_VOLUME` و `AMBIENT_VOLUME`) |
 | `tools/screenshot.py` | بازسازی `screenshot.png` بدون پنجره |
+| `tools/smoke_audio.py` | تست صدا بدون پنجره: ساخت، پخش، قطع صدا، رفت‌وبرگشت ذخیره |
+| `tools/smoke_game.py` | تست یکپارچگی حلقه‌ی واقعی بازی بدون پنجره |
 
 اضافه کردن مرحله‌ی جدید = اضافه کردن یک dict به `LEVELS` در `levels_data.py` (راهنمای نمادها
 بالای همان فایل است).
+
+### CI/CD
+گیت‌هاب اکشنز همه‌چیز را خودکار انجام می‌دهد:
+* **CI** (`.github/workflows/ci.yml`) — با هر پوش به `main` و هر PR: بررسی کامپایل + تست صدا +
+  تست حلقه‌ی بازی + اعتبارسنجی اسکرین‌شات روی ماتریس ویندوز/اوبونتو (پایتون ۳.۱۰ و ۳.۱۲)،
+  به‌علاوه اسکن امنیتی وابستگی‌ها با `pip-audit`.
+* **ریلیز** (`.github/workflows/release.yml`) — پوش کردن تگی مثل `v1.0.0` کل تست‌ها را اجرا
+  می‌کند، یک فایل exe تک‌فایلی و بدون کنسول ویندوز با PyInstaller می‌سازد، زیپ می‌کند و با
+  یادداشت‌های خودکار به یک GitHub Release می‌چسباند.
+
+برای گرفتن ریلیز:
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```

@@ -1,284 +1,166 @@
-"""Player class for Chroma Lie."""
-
+"""
+player.py - the neon square: movement, jump, gravity and tile collision.
+"""
+import math
 import pygame
-from config import *
-from deception import deception
+from config import (PLAYER_SIZE, GRAVITY, MAX_FALL, MOVE_SPEED, GROUND_ACCEL, AIR_ACCEL,
+                    GROUND_FRICTION, JUMP_VELOCITY, JUMP_CUT, COYOTE_TIME, JUMP_BUFFER,
+                    SPRING_VELOCITY, PLAYER)
+from effects import blit_glow, scale_color
+
+
+def approach(value, target, step):
+    if value < target:
+        return min(value + step, target)
+    return max(value - step, target)
+
+
+class InputState:
+    """Boolean key state polled every frame (smooth movement, not just KEYDOWN)."""
+    LEFT = (pygame.K_LEFT, pygame.K_a)
+    RIGHT = (pygame.K_RIGHT, pygame.K_d)
+    JUMP = (pygame.K_SPACE, pygame.K_UP, pygame.K_w)
+
+    def __init__(self):
+        self.left = self.right = self.jump_held = False
+        self.jump_pressed = False
+
+    def poll(self, jump_pressed_this_frame):
+        keys = pygame.key.get_pressed()
+        self.left = any(keys[k] for k in self.LEFT)
+        self.right = any(keys[k] for k in self.RIGHT)
+        self.jump_held = any(keys[k] for k in self.JUMP)
+        self.jump_pressed = jump_pressed_this_frame
+
 
 class Player:
     def __init__(self, x, y):
-        self.rect = pygame.Rect(x, y, PLAYER_SIZE, PLAYER_SIZE)
-        self.vel_x = 0.0
-        self.vel_y = 0.0
+        self.x, self.y = float(x), float(y)
+        self.w = self.h = PLAYER_SIZE
+        self.vx = self.vy = 0.0
         self.on_ground = False
-        self.facing_right = True
-        self.dash_timer = 0.0
-        self.dash_cooldown_timer = 0.0
-        self.dead = False
-        self.death_timer = 0.0
-        self.death_particles = []
+        self.ground_kinds = set()
+        self.riding = None
+        self.coyote = 0.0
+        self.buffer = 0.0
+        self.facing = 1
+        self.squash = 0.0          # >0 squashed (landing), <0 stretched (jump)
+        self.just_landed = False
+        self.just_jumped = False
+        self.sprung = False
+        self._spring_rise = False  # spring launches ignore the jump-cut
 
-        # Sub-pixel accumulators for ultra-smooth floating movement
-        self._sub_x = 0.0
-        self._sub_y = 0.0
+    @property
+    def rect(self):
+        return pygame.Rect(int(round(self.x)), int(round(self.y)), self.w, self.h)
 
-        # Movement state flags (supports both Arrow keys and WASD)
-        self.move_left = False
-        self.move_right = False
-        self.jump_buffered = False
-        self.jump_buffer_timer = 0.0
-        self.coyote_timer = 0.0
+    # ------------------------------------------------------------ update
+    def update(self, dt, inp, level, controls_swapped):
+        self.just_landed = self.just_jumped = self.sprung = False
+        direction = (1 if inp.right else 0) - (1 if inp.left else 0)
+        if controls_swapped:
+            direction = -direction
+        if direction:
+            self.facing = direction
 
-    def handle_event(self, event):
-        """Handle keyboard events for movement with multi-key support."""
-        if event.type == pygame.KEYUP:
-            if event.key in (pygame.K_LEFT, pygame.K_a):
-                self.move_left = False
-            elif event.key in (pygame.K_RIGHT, pygame.K_d):
-                self.move_right = False
-            return
-
-        if self.dead:
-            return
-
-        if event.type == pygame.KEYDOWN:
-            if event.key in (pygame.K_LEFT, pygame.K_a):
-                self.move_left = True
-            elif event.key in (pygame.K_RIGHT, pygame.K_d):
-                self.move_right = True
-            elif event.key in (pygame.K_SPACE, pygame.K_UP, pygame.K_w):
-                self.request_jump()
-            elif event.key in (pygame.K_LSHIFT, pygame.K_RSHIFT):
-                self.dash()
-
-    def request_jump(self):
-        """Request a jump, utilizing coyote time and jump buffer."""
-        if self.on_ground or self.coyote_timer > 0:
-            self.execute_jump()
-        else:
-            self.jump_buffered = True
-            self.jump_buffer_timer = JUMP_BUFFER_TIME
-
-    def execute_jump(self):
-        """Perform the actual jump velocity application."""
-        self.vel_y = PLAYER_JUMP_FORCE
-        self.on_ground = False
-        self.coyote_timer = 0.0
-        self.jump_buffered = False
-
-    def dash(self):
-        """Perform a quick dash in the current facing direction."""
-        if self.dash_cooldown_timer <= 0 and not self.dead:
-            self.dash_timer = DASH_DURATION
-            self.dash_cooldown_timer = DASH_COOLDOWN
-            dash_dir = 1 if self.facing_right else -1
-            self.vel_x = dash_dir * DASH_SPEED
-
-    def update(self, dt, level_tiles):
-        """Update player position and physics with coyote time and buffer."""
-        if self.dead:
-            self.update_death(dt)
-            return
-
-        # Update jump buffer timer
-        if self.jump_buffered:
-            self.jump_buffer_timer -= dt
-            if self.jump_buffer_timer <= 0:
-                self.jump_buffered = False
-
-        # Update coyote timer
+        target = direction * MOVE_SPEED
         if self.on_ground:
-            self.coyote_timer = COYOTE_TIME
+            accel = GROUND_ACCEL if direction else GROUND_FRICTION
         else:
-            if self.coyote_timer > 0:
-                self.coyote_timer -= dt
+            accel = AIR_ACCEL
+        self.vx = approach(self.vx, target, accel * dt)
 
-        # Apply control swap from deception
-        controls_swapped = deception.current_rules.get("controls_swapped", False)
-        move_left = self.move_right if controls_swapped else self.move_left
-        move_right = self.move_left if controls_swapped else self.move_right
+        # jump buffer + coyote time = forgiving, fair jumps
+        self.buffer = JUMP_BUFFER if inp.jump_pressed else max(0.0, self.buffer - dt)
+        self.coyote = COYOTE_TIME if self.on_ground else max(0.0, self.coyote - dt)
+        if self.buffer > 0 and self.coyote > 0:
+            self.vy = -JUMP_VELOCITY
+            self.buffer = self.coyote = 0.0
+            self.on_ground = False
+            self.riding = None
+            self.just_jumped = True
+            self.squash = -0.35
+        if not inp.jump_held and self.vy < -JUMP_VELOCITY * JUMP_CUT and not self._spring_rise:
+            self.vy = -JUMP_VELOCITY * JUMP_CUT
+        if self.vy >= 0:
+            self._spring_rise = False
+        self.vy = min(self.vy + GRAVITY * dt, MAX_FALL)
 
-        # Horizontal movement
-        target_vel_x = 0.0
-        if move_left:
-            target_vel_x = -PLAYER_SPEED
-            self.facing_right = False
-        if move_right:
-            target_vel_x = PLAYER_SPEED
-            self.facing_right = True
+        # ride moving platforms
+        if self.riding is not None:
+            self.x += self.riding.dx
+            self.y += self.riding.dy
 
-        # Smooth acceleration/deceleration
-        if self.dash_timer > 0:
-            self.dash_timer -= dt
-        else:
-            if abs(target_vel_x) > 0.1:
-                self.vel_x = target_vel_x
+        was_ground = self.on_ground
+        self.x += self.vx * dt
+        self._collide(level, "x")
+        self.y += self.vy * dt
+        self._collide(level, "y")
+        self._probe_ground(level)
+
+        if self.on_ground and not was_ground:
+            self.just_landed = True
+            self.squash = 0.3
+        if self.on_ground and "J" in self.ground_kinds:
+            self.vy = -SPRING_VELOCITY
+            self._spring_rise = True
+            self.on_ground = False
+            self.riding = None
+            self.sprung = True
+            self.squash = -0.5
+        self.squash = approach(self.squash, 0.0, dt * 2.2)
+
+    def _collide(self, level, axis):
+        r = self.rect
+        for solid in level.solids_near(r):
+            if not r.colliderect(solid.rect):
+                continue
+            s = solid.rect
+            if axis == "x":
+                if self.vx > 0 or (self.vx == 0 and r.centerx < s.centerx):
+                    self.x = s.left - self.w
+                else:
+                    self.x = s.right
+                self.vx = 0.0
             else:
-                self.vel_x *= FRICTION
-                if abs(self.vel_x) < 10:
-                    self.vel_x = 0
+                if self.vy > 0 or (self.vy == 0 and r.centery < s.centery):
+                    self.y = s.top - self.h
+                else:
+                    self.y = s.bottom
+                self.vy = 0.0
+            r = self.rect
 
-        # Apply gravity
-        self.vel_y += GRAVITY * dt
-        if self.vel_y > MAX_FALL_SPEED:
-            self.vel_y = MAX_FALL_SPEED
-
-        # Update dash cooldown
-        if self.dash_cooldown_timer > 0:
-            self.dash_cooldown_timer -= dt
-
-        # Move horizontally and vertically
-        self.move_horizontally(level_tiles, dt)
-        self.move_vertically(level_tiles, dt)
-
-        # Check if jump buffer can now execute upon landing
-        if self.jump_buffered and (self.on_ground or self.coyote_timer > 0):
-            self.execute_jump()
-
-        # Update deception with player state
-        deception.set_player_state(
-            moving=(abs(self.vel_x) > 10),
-            jumping=not self.on_ground
-        )
-
-    def move_horizontally(self, rects, dt):
-        """Sub-pixel precise horizontal movement."""
-        self._sub_x += self.vel_x * dt
-        dx = int(self._sub_x)
-        if dx == 0:
-            return
-        self._sub_x -= dx
-
-        self.rect.x += dx
-        for item in rects:
-            tile_rect = item.rect if hasattr(item, 'rect') else item
-            if not self.rect.colliderect(tile_rect):
-                continue
-            if dx > 0:
-                self.rect.right = tile_rect.left
-            elif dx < 0:
-                self.rect.left = tile_rect.right
-            self.vel_x = 0
-            self._sub_x = 0.0
-            break
-
-    def move_vertically(self, rects, dt):
-        """Sub-pixel precise vertical movement with ground probe."""
-        self._sub_y += self.vel_y * dt
-        dy = int(self._sub_y)
-        if dy == 0:
-            return
-        self._sub_y -= dy
-
-        self.rect.y += dy
-
-        landed = False
-        for item in rects:
-            tile_rect = item.rect if hasattr(item, 'rect') else item
-            if not self.rect.colliderect(tile_rect):
-                continue
-            if dy > 0:
-                self.rect.bottom = tile_rect.top
-                landed = True
-            elif dy < 0:
-                self.rect.top = tile_rect.bottom
-                self.vel_y = 0
-            self._sub_y = 0.0
-
+    def _probe_ground(self, level):
+        """Look 1px below the feet: stable ground detection + which tiles we stand on."""
+        probe = self.rect.move(0, 1)
         self.on_ground = False
-        if landed:
-            probe = self.rect.move(0, GROUND_PROBE)
-            for item in rects:
-                tile_rect = item.rect if hasattr(item, 'rect') else item
-                if probe.colliderect(tile_rect):
-                    self.on_ground = True
-                    break
-
-    def update_death(self, dt):
-        """Update death animation and particles."""
-        self.death_timer += dt
-        for particle in self.death_particles[:]:
-            particle['life'] -= dt
-            particle['x'] += particle['vel_x'] * dt
-            particle['y'] += particle['vel_y'] * dt
-            particle['vel_y'] += GRAVITY * 0.5 * dt
-            if particle['life'] <= 0:
-                self.death_particles.remove(particle)
-
-    def trigger_death(self, screen_center):
-        """Trigger death animation at current position."""
-        self.dead = True
-        self.death_timer = 0.0
-        self.death_particles = []
-
-        import random
-        for _ in range(DEATH_PARTICLE_COUNT):
-            angle = random.uniform(0, 2 * 3.14159)
-            speed = random.uniform(100, 300)
-            self.death_particles.append({
-                'x': self.rect.centerx,
-                'y': self.rect.centery,
-                'vel_x': speed * __import__('math').cos(angle),
-                'vel_y': speed * __import__('math').sin(angle),
-                'life': random.uniform(0.3, DEATH_PARTICLE_LIFETIME),
-                'color': random.choice(PARTICLE_COLORS),
-                'size': random.randint(3, 8)
-            })
-
-    def reset(self, x, y):
-        """Reset player to starting position."""
-        self.rect.x = x
-        self.rect.y = y
-        self.vel_x = 0.0
-        self.vel_y = 0.0
-        self._sub_x = 0.0
-        self._sub_y = 0.0
-        self.on_ground = False
-        self.facing_right = True
-        self.dash_timer = 0.0
-        self.dash_cooldown_timer = 0.0
-        self.dead = False
-        self.death_timer = 0.0
-        self.death_particles = []
-        self.move_left = False
-        self.move_right = False
-        self.jump_buffered = False
-
-    def draw(self, screen, camera_offset=(0, 0), glitch_offset=(0, 0)):
-        """Draw the player with glow effect."""
-        if self.dead:
-            for particle in self.death_particles:
-                alpha = int(255 * (particle['life'] / DEATH_PARTICLE_LIFETIME))
-                size = max(1, int(particle['size'] * (particle['life'] / DEATH_PARTICLE_LIFETIME)))
-                x = int(particle['x'] + camera_offset[0] + glitch_offset[0])
-                y = int(particle['y'] + camera_offset[1] + glitch_offset[1])
-                pygame.draw.circle(screen, particle['color'], (x, y), size)
+        self.ground_kinds = set()
+        self.riding = None
+        if self.vy < 0:
             return
+        for solid in level.solids_near(probe):
+            if probe.colliderect(solid.rect) and solid.rect.top >= self.rect.bottom:
+                self.on_ground = True
+                self.ground_kinds.add(solid.kind)
+                if solid.owner is not None:
+                    self.riding = solid.owner
 
-        draw_x = self.rect.x + camera_offset[0] + glitch_offset[0]
-        draw_y = self.rect.y + camera_offset[1] + glitch_offset[1]
-
-        glow_surf = pygame.Surface((PLAYER_SIZE + 16, PLAYER_SIZE + 16), pygame.SRCALPHA)
-        for i in range(4):
-            alpha = 30 - i * 7
-            size_inc = i * 4
-            pygame.draw.rect(glow_surf, (*PLAYER_COLOR, alpha),
-                           (8 - size_inc//2, 8 - size_inc//2, PLAYER_SIZE + size_inc, PLAYER_SIZE + size_inc),
-                           border_radius=6)
-        screen.blit(glow_surf, (draw_x - 8, draw_y - 8))
-
-        player_rect = pygame.Rect(draw_x, draw_y, PLAYER_SIZE, PLAYER_SIZE)
-        pygame.draw.rect(screen, PLAYER_COLOR, player_rect, border_radius=4)
-
-        highlight_rect = pygame.Rect(draw_x + 4, draw_y + 4, PLAYER_SIZE - 8, PLAYER_SIZE - 8)
-        highlight_color = (min(255, PLAYER_COLOR[0] + 30), min(255, PLAYER_COLOR[1] + 30), min(255, PLAYER_COLOR[2] + 30))
-        pygame.draw.rect(screen, highlight_color, highlight_rect, border_radius=2)
-
-        if self.facing_right:
-            points = [(draw_x + PLAYER_SIZE - 6, draw_y + PLAYER_SIZE//2),
-                      (draw_x + PLAYER_SIZE - 12, draw_y + PLAYER_SIZE//2 - 4),
-                      (draw_x + PLAYER_SIZE - 12, draw_y + PLAYER_SIZE//2 + 4)]
-        else:
-            points = [(draw_x + 6, draw_y + PLAYER_SIZE//2),
-                      (draw_x + 12, draw_y + PLAYER_SIZE//2 - 4),
-                      (draw_x + 12, draw_y + PLAYER_SIZE//2 + 4)]
-        pygame.draw.polygon(screen, (255, 255, 255), points)
+    # ------------------------------------------------------------ draw
+    def draw(self, surf, t, offset=(0, 0)):
+        ox, oy = offset
+        r = self.rect
+        k = self.squash
+        w = int(self.w * (1 + k * 0.6))
+        h = int(self.h * (1 - k * 0.6))
+        body = pygame.Rect(0, 0, w, h)
+        body.midbottom = (r.centerx + ox, r.bottom + oy)
+        blit_glow(surf, body.center, 34, PLAYER, 0.55)
+        pygame.draw.rect(surf, (20, 24, 36), body, border_radius=4)
+        inner = body.inflate(-8, -8)
+        pulse = 0.55 + 0.15 * math.sin(t * 5)
+        pygame.draw.rect(surf, scale_color(PLAYER, pulse * 0.45), inner, border_radius=2)
+        pygame.draw.rect(surf, PLAYER, body, 2, border_radius=4)
+        # "eye" shows which way we face
+        eye = pygame.Rect(0, 0, 5, 5)
+        eye.center = (body.centerx + self.facing * 5, body.centery - 2)
+        pygame.draw.rect(surf, PLAYER, eye)

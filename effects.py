@@ -1,287 +1,251 @@
-"""Visual effects module for Chroma Lie:
-Camera shake, chromatic aberration glitch, scanlines, background grid, and particle systems.
 """
-
+effects.py - juice: particles, glow, screen shake, flash, glitch
+(chromatic aberration) and the animated background.
+Everything is code-generated, no image assets.
+"""
 import math
 import random
 import pygame
-from config import (
-    SCREEN_WIDTH,
-    SCREEN_HEIGHT,
-    BG_COLOR,
-    GRID_COLOR,
-    RED_DANGER,
-    BLUE_SAFE,
-    PARTICLE_COLORS,
-)
+from config import WIDTH, HEIGHT, BG, BG_GRID, BG_GRID_MAJOR, TILE
 
 
+def scale_color(color, k):
+    return (max(0, min(255, int(color[0] * k))),
+            max(0, min(255, int(color[1] * k))),
+            max(0, min(255, int(color[2] * k))))
+
+
+def mix(a, b, t):
+    return (int(a[0] + (b[0] - a[0]) * t), int(a[1] + (b[1] - a[1]) * t), int(a[2] + (b[2] - a[2]) * t))
+
+
+# ---------------------------------------------------------------- glow
+_glow_cache = {}
+
+
+def glow_surface(radius, color, intensity=1.0):
+    """Radial glow on black; blit with BLEND_ADD. Cached."""
+    key = (radius, color, round(intensity, 2))
+    surf = _glow_cache.get(key)
+    if surf is None:
+        surf = pygame.Surface((radius * 2, radius * 2))
+        surf.fill((0, 0, 0))
+        for r in range(radius, 0, -2):
+            k = ((1 - r / radius) ** 2) * intensity
+            pygame.draw.circle(surf, scale_color(color, k), (radius, radius), r)
+        _glow_cache[key] = surf
+    return surf
+
+
+def blit_glow(target, pos, radius, color, intensity=1.0):
+    g = glow_surface(radius, color, intensity)
+    target.blit(g, (int(pos[0] - radius), int(pos[1] - radius)), special_flags=pygame.BLEND_ADD)
+
+
+def blur(surface, factor=6):
+    """Cheap blur: shrink then enlarge with smoothscale."""
+    w, h = surface.get_size()
+    small = pygame.transform.smoothscale(surface, (max(1, w // factor), max(1, h // factor)))
+    return pygame.transform.smoothscale(small, (w, h))
+
+
+# ---------------------------------------------------------------- particles
 class Particle:
-    """A single particle with decay and movement."""
+    __slots__ = ("x", "y", "vx", "vy", "life", "max_life", "size", "color", "gravity", "drag", "shrink")
 
-    def __init__(self, x, y, vel_x, vel_y, color, lifetime, size=3, shrink=True, gravity=0.0):
-        self.x = float(x)
-        self.y = float(y)
-        self.vel_x = float(vel_x)
-        self.vel_y = float(vel_y)
-        self.color = color
-        self.max_life = lifetime
-        self.life = lifetime
-        self.initial_size = size
-        self.size = size
-        self.shrink = shrink
-        self.gravity = gravity
-
-    def update(self, dt):
-        """Update particle physics and lifetime."""
-        self.life -= dt
-        self.x += self.vel_x * dt
-        self.y += self.vel_y * dt
-        self.vel_y += self.gravity * dt
-
-        if self.shrink and self.max_life > 0:
-            ratio = max(0.0, self.life / self.max_life)
-            self.size = max(1.0, self.initial_size * ratio)
-
-    def is_alive(self):
-        return self.life > 0
-
-    def draw(self, surface, offset_x=0, offset_y=0):
-        if self.life <= 0:
-            return
-        alpha = int(255 * max(0.0, min(1.0, self.life / self.max_life)))
-        radius = int(self.size)
-        px = int(self.x + offset_x)
-        py = int(self.y + offset_y)
-
-        part_surf = pygame.Surface((radius * 2 + 2, radius * 2 + 2), pygame.SRCALPHA)
-        color_with_alpha = (*self.color[:3], alpha)
-        pygame.draw.circle(part_surf, color_with_alpha, (radius + 1, radius + 1), radius)
-        surface.blit(part_surf, (px - radius - 1, py - radius - 1))
+    def __init__(self, x, y, vx, vy, life, size, color, gravity=0.0, drag=0.0, shrink=True):
+        self.x, self.y, self.vx, self.vy = x, y, vx, vy
+        self.life = self.max_life = life
+        self.size, self.color = size, color
+        self.gravity, self.drag, self.shrink = gravity, drag, shrink
 
 
 class ParticleSystem:
-    """Manages pools of particles for various game events."""
+    MAX = 1400
 
     def __init__(self):
-        self.particles = []
-        self.ambient_particles = []
-        self._init_ambient()
+        self.items = []
 
-    def _init_ambient(self):
-        """Pre-populate subtle floating ambient digital particles."""
-        for _ in range(40):
-            x = random.uniform(0, SCREEN_WIDTH)
-            y = random.uniform(0, SCREEN_HEIGHT)
-            vel_x = random.uniform(-10, 10)
-            vel_y = random.uniform(-20, -5)
-            color = random.choice([(40, 60, 90), (60, 40, 80), (30, 80, 100)])
-            life = random.uniform(3.0, 7.0)
-            p = Particle(x, y, vel_x, vel_y, color, life, size=random.uniform(1.5, 3.0), shrink=False)
-            self.ambient_particles.append(p)
+    def emit(self, x, y, vx, vy, life, size, color, gravity=0.0, drag=0.0, shrink=True):
+        if len(self.items) < self.MAX:
+            self.items.append(Particle(x, y, vx, vy, life, size, color, gravity, drag, shrink))
 
-    def emit_death_burst(self, x, y):
-        """Explosion of neon shards upon player demise."""
-        for _ in range(40):
-            angle = random.uniform(0, 2 * math.pi)
-            speed = random.uniform(80, 360)
-            vx = math.cos(angle) * speed
-            vy = math.sin(angle) * speed
-            color = random.choice(PARTICLE_COLORS)
-            life = random.uniform(0.4, 0.9)
-            size = random.uniform(3, 7)
-            self.particles.append(
-                Particle(x, y, vx, vy, color, life, size=size, shrink=True, gravity=500.0)
-            )
-
-    def emit_trail(self, x, y, color):
-        """Subtle glow particle trail behind the player."""
-        vx = random.uniform(-15, 15)
-        vy = random.uniform(-15, 15)
-        life = random.uniform(0.2, 0.4)
-        size = random.uniform(2, 4)
-        self.particles.append(
-            Particle(x, y, vx, vy, color, life, size=size, shrink=True)
-        )
-
-    def emit_gate_spark(self, x, y, width, height):
-        """Pulsing portal sparks around the exit gate."""
-        if random.random() < 0.4:
-            px = random.uniform(x, x + width)
-            py = random.uniform(y, y + height)
-            vx = random.uniform(-20, 20)
-            vy = random.uniform(-50, -10)
-            color = random.choice([(100, 255, 180), (150, 255, 220), (50, 220, 140)])
-            self.particles.append(
-                Particle(px, py, vx, vy, color, lifetime=0.6, size=random.uniform(2, 4))
-            )
-
-    def update(self, dt):
-        """Update all active particles."""
-        # Dynamic active particles
-        for p in self.particles[:]:
-            p.update(dt)
-            if not p.is_alive():
-                self.particles.remove(p)
-
-        # Ambient floating dust
-        for p in self.ambient_particles:
-            p.update(dt)
-            if not p.is_alive() or p.y < -10 or p.x < -10 or p.x > SCREEN_WIDTH + 10:
-                p.x = random.uniform(0, SCREEN_WIDTH)
-                p.y = SCREEN_HEIGHT + 5
-                p.life = random.uniform(4.0, 8.0)
-                p.vel_y = random.uniform(-25, -8)
-
-    def draw(self, surface, offset_x=0, offset_y=0):
-        for p in self.ambient_particles:
-            p.draw(surface, offset_x, offset_y)
-        for p in self.particles:
-            p.draw(surface, offset_x, offset_y)
+    def burst(self, x, y, color, count, speed=(80, 320), life=(0.4, 0.9), size=(3, 7), gravity=600.0):
+        for _ in range(count):
+            a = random.uniform(0, math.tau)
+            s = random.uniform(*speed)
+            self.emit(x, y, math.cos(a) * s, math.sin(a) * s, random.uniform(*life),
+                      random.uniform(*size), color, gravity, 1.5)
 
     def clear(self):
-        self.particles.clear()
+        self.items.clear()
+
+    def update(self, dt):
+        alive = []
+        for p in self.items:
+            p.life -= dt
+            if p.life <= 0:
+                continue
+            p.vy += p.gravity * dt
+            if p.drag:
+                f = max(0.0, 1 - p.drag * dt)
+                p.vx *= f
+                p.vy *= f
+            p.x += p.vx * dt
+            p.y += p.vy * dt
+            alive.append(p)
+        self.items = alive
+
+    def draw(self, surf, offset=(0, 0)):
+        ox, oy = offset
+        for p in self.items:
+            k = p.life / p.max_life
+            s = p.size * (k if p.shrink else 1.0)
+            if s < 0.6:
+                continue
+            rect = (int(p.x - s / 2 + ox), int(p.y - s / 2 + oy), max(1, int(s)), max(1, int(s)))
+            surf.fill(scale_color(p.color, 0.25 + 0.75 * k), rect, special_flags=pygame.BLEND_ADD)
 
 
-class CameraShake:
-    """Procedural screenshake with decay."""
+# ---------------------------------------------------------------- camera shake / flash / glitch
+class Shake:
+    def __init__(self):
+        self.trauma = 0.0
+
+    def add(self, amount):
+        self.trauma = min(1.0, self.trauma + amount)
+
+    def update(self, dt):
+        self.trauma = max(0.0, self.trauma - dt * 1.8)
+
+    def offset(self):
+        if self.trauma <= 0:
+            return 0, 0
+        m = 14 * self.trauma * self.trauma
+        return int(random.uniform(-m, m)), int(random.uniform(-m, m))
+
+
+class Flash:
+    def __init__(self):
+        self.alpha = 0.0
+        self.color = (255, 59, 92)
+        self.overlay = pygame.Surface((WIDTH, HEIGHT))
+
+    def trigger(self, color, alpha=150):
+        self.color, self.alpha = color, alpha
+
+    def update(self, dt):
+        self.alpha = max(0.0, self.alpha - dt * 520)
+
+    def draw(self, surf):
+        if self.alpha > 1:
+            self.overlay.fill(self.color)
+            self.overlay.set_alpha(int(self.alpha))
+            surf.blit(self.overlay, (0, 0))
+
+
+class Glitch:
+    """Chromatic aberration (split red / cyan layers) + displaced horizontal slices."""
 
     def __init__(self):
-        self.duration = 0.0
-        self.intensity = 0.0
         self.timer = 0.0
+        self.duration = 0.4
+        self.strength = 1.0
 
-    def start(self, duration=0.3, intensity=8.0):
-        self.duration = duration
-        self.intensity = intensity
-        self.timer = duration
+    def trigger(self, duration=0.4, strength=1.0):
+        self.timer = self.duration = duration
+        self.strength = strength
 
     def update(self, dt):
-        if self.timer > 0:
-            self.timer -= dt
+        self.timer = max(0.0, self.timer - dt)
 
-    def get_offset(self):
-        if self.timer <= 0 or self.duration <= 0:
-            return (0, 0)
-        progress = self.timer / self.duration
-        cur_intensity = self.intensity * progress
-        ox = random.uniform(-cur_intensity, cur_intensity)
-        oy = random.uniform(-cur_intensity, cur_intensity)
-        return (int(ox), int(oy))
+    @property
+    def active(self):
+        return self.timer > 0
+
+    def apply(self, frame):
+        if self.timer <= 0:
+            return frame
+        k = self.timer / self.duration
+        shift = int(2 + 9 * k * self.strength)
+        red = frame.copy()
+        red.fill((255, 0, 0), special_flags=pygame.BLEND_MULT)
+        cyan = frame.copy()
+        cyan.fill((0, 255, 255), special_flags=pygame.BLEND_MULT)
+        out = pygame.Surface(frame.get_size())
+        out.fill((0, 0, 0))
+        out.blit(red, (shift, 0), special_flags=pygame.BLEND_ADD)
+        out.blit(cyan, (-shift, 0), special_flags=pygame.BLEND_ADD)
+        w, h = out.get_size()
+        for _ in range(int(2 + 6 * k * self.strength)):
+            y = random.randrange(0, h - 4)
+            sh = min(random.randint(3, 22), h - y)
+            strip = out.subsurface((0, y, w, sh)).copy()
+            out.blit(strip, (random.randint(-28, 28), y))
+        return out
 
 
-class GlitchManager:
-    """Simulates CRT scanlines, chromatic aberration, and digital slices."""
+# ---------------------------------------------------------------- background
+class Background:
+    """Dark navy lab: slowly drifting grid, faint motes and a vignette."""
 
     def __init__(self):
-        self.glitch_time = 0.0
-        self.total_duration = 0.0
-        self.intensity = 6.0
-        self.slice_glitches = []
-        self._scanline_surface = None
-        self._create_scanlines()
+        size = (WIDTH + TILE * 4, HEIGHT + TILE * 4)
+        self.grid = pygame.Surface(size)
+        self.grid.fill(BG)
+        for x in range(0, size[0], TILE):
+            pygame.draw.line(self.grid, BG_GRID_MAJOR if x % (TILE * 4) == 0 else BG_GRID, (x, 0), (x, size[1]))
+        for y in range(0, size[1], TILE):
+            pygame.draw.line(self.grid, BG_GRID_MAJOR if y % (TILE * 4) == 0 else BG_GRID, (0, y), (size[0], y))
+        self.motes = [[random.uniform(0, WIDTH), random.uniform(0, HEIGHT), random.uniform(4, 16),
+                       random.uniform(1, 2.5), random.uniform(0, math.tau)] for _ in range(46)]
+        self.vignette = self._make_vignette()
+        self.t = 0.0
 
-    def _create_scanlines(self):
-        """Pre-render subtle horizontal CRT scanlines."""
-        self._scanline_surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-        for y in range(0, SCREEN_HEIGHT, 4):
-            pygame.draw.line(self._scanline_surface, (0, 0, 0, 30), (0, y), (SCREEN_WIDTH, y), 1)
-
-    def trigger(self, duration=0.4, intensity=8.0):
-        """Trigger an active digital glitch."""
-        self.total_duration = duration
-        self.glitch_time = duration
-        self.intensity = intensity
-        self.slice_glitches = []
-
-        # Generate a few random slice displacements
-        num_slices = random.randint(3, 7)
-        for _ in range(num_slices):
-            y_start = random.randint(20, SCREEN_HEIGHT - 60)
-            height = random.randint(8, 30)
-            shift = random.randint(-int(intensity * 2), int(intensity * 2))
-            self.slice_glitches.append((y_start, height, shift))
+    @staticmethod
+    def _make_vignette():
+        sw, sh = 48, 32
+        small = pygame.Surface((sw, sh), pygame.SRCALPHA)
+        for y in range(sh):
+            for x in range(sw):
+                dx = (x - sw / 2 + 0.5) / (sw / 2)
+                dy = (y - sh / 2 + 0.5) / (sh / 2)
+                d = min(1.0, math.sqrt(dx * dx + dy * dy) / 1.25)
+                small.set_at((x, y), (0, 0, 0, int(200 * d ** 2.2)))
+        return pygame.transform.smoothscale(small, (WIDTH, HEIGHT))
 
     def update(self, dt):
-        if self.glitch_time > 0:
-            self.glitch_time -= dt
-            # Periodically re-randomize slice shifts while active
-            if random.random() < 0.2:
-                for i in range(len(self.slice_glitches)):
-                    y_start, height, _ = self.slice_glitches[i]
-                    shift = random.randint(-int(self.intensity * 2.5), int(self.intensity * 2.5))
-                    self.slice_glitches[i] = (y_start, height, shift)
-        else:
-            self.slice_glitches.clear()
+        self.t += dt
+        for m in self.motes:
+            m[1] -= m[2] * dt
+            m[0] += math.sin(self.t * 0.6 + m[4]) * 4 * dt
+            if m[1] < -4:
+                m[1] = HEIGHT + 4
+                m[0] = random.uniform(0, WIDTH)
 
-    def is_active(self):
-        return self.glitch_time > 0
+    def draw(self, surf):
+        off = (self.t * 7) % (TILE * 4)
+        surf.blit(self.grid, (-off, -off))
+        for x, y, _, s, ph in self.motes:
+            k = 0.35 + 0.25 * math.sin(self.t * 1.3 + ph)
+            surf.fill(scale_color((90, 110, 170), k), (int(x), int(y), int(s), int(s)),
+                      special_flags=pygame.BLEND_ADD)
 
-    def get_glitch_offset(self):
-        """Get current chromatic aberration offset for camera rendering."""
-        if not self.is_active() or self.total_duration <= 0:
-            return (0, 0)
-        factor = self.glitch_time / self.total_duration
-        offset = int(self.intensity * factor * math.sin(self.glitch_time * 50))
-        return (offset, 0)
-
-    def apply_to_surface(self, target_surface):
-        """Applies chromatic aberration and slice glitches directly to surface."""
-        # 1. Slice horizontal displacement
-        if self.is_active() and self.slice_glitches:
-            temp_copy = target_surface.copy()
-            for y, h, shift in self.slice_glitches:
-                if y + h > SCREEN_HEIGHT:
-                    continue
-                slice_rect = pygame.Rect(0, y, SCREEN_WIDTH, h)
-                target_surface.blit(temp_copy, (shift, y), slice_rect)
-
-        # 2. Chromatic aberration color split
-        if self.is_active() and self.total_duration > 0:
-            factor = self.glitch_time / self.total_duration
-            offset = int(self.intensity * factor * math.sin(self.glitch_time * 50))
-            if abs(offset) > 1:
-                # Tint overlay simulation
-                red_tint = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-                blue_tint = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-                red_tint.fill((255, 0, 0, 20))
-                blue_tint.fill((0, 100, 255, 20))
-                target_surface.blit(red_tint, (offset, 0), special_flags=pygame.BLEND_RGB_ADD)
-                target_surface.blit(blue_tint, (-offset, 0), special_flags=pygame.BLEND_RGB_ADD)
-
-        # 3. Always blit subtle scanlines for cyber feel
-        if self._scanline_surface:
-            target_surface.blit(self._scanline_surface, (0, 0))
+    def draw_vignette(self, surf):
+        surf.blit(self.vignette, (0, 0))
 
 
-class BackgroundGrid:
-    """Renders a digital grid with subtle scrolling and pulse."""
+class Effects:
+    """Bundle so the game owns one object for all juice."""
 
-    def __init__(self, cell_size=40):
-        self.cell_size = cell_size
-        self.offset_x = 0.0
-        self.offset_y = 0.0
-        self.time = 0.0
+    def __init__(self):
+        self.particles = ParticleSystem()
+        self.shake = Shake()
+        self.flash = Flash()
+        self.glitch = Glitch()
 
     def update(self, dt):
-        self.time += dt
-        self.offset_x = (self.offset_x + 8.0 * dt) % self.cell_size
-        self.offset_y = (self.offset_y + 4.0 * dt) % self.cell_size
-
-    def draw(self, surface):
-        surface.fill(BG_COLOR)
-
-        # Draw grid lines
-        alpha_pulse = 28 + int(10 * math.sin(self.time * 1.5))
-        grid_color = (*GRID_COLOR[:3], alpha_pulse)
-        grid_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-
-        start_x = int(-self.cell_size + self.offset_x)
-        for x in range(start_x, SCREEN_WIDTH + self.cell_size, self.cell_size):
-            pygame.draw.line(grid_surf, grid_color, (x, 0), (x, SCREEN_HEIGHT), 1)
-
-        start_y = int(-self.cell_size + self.offset_y)
-        for y in range(start_y, SCREEN_HEIGHT + self.cell_size, self.cell_size):
-            pygame.draw.line(grid_surf, grid_color, (0, y), (SCREEN_WIDTH, y), 1)
-
-        surface.blit(grid_surf, (0, 0))
+        self.particles.update(dt)
+        self.shake.update(dt)
+        self.flash.update(dt)
+        self.glitch.update(dt)

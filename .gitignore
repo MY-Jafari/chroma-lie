@@ -180,3 +180,18 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 .claude
+
+# ================================================================
+# Chroma Lie (project-specific)
+# ================================================================
+
+# player save file: progress, best scores, mute setting
+chroma_lie_save.json
+
+# local agent/workspace state (machine-specific ids)
+.freebuff/
+
+# OS junk
+.DS_Store
+Thumbs.db
+Desktop.ini

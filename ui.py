@@ -1,305 +1,273 @@
-"""UI system for Chroma Lie:
-HUD, rule banners, text glow effects, menus, victory/narrative screens.
 """
-
+ui.py - HUD, the instruction banner (which may lie), menus and screens.
+Fonts are loaded once at start-up.
+"""
 import math
+import random
 import pygame
-from config import (
-    SCREEN_WIDTH,
-    SCREEN_HEIGHT,
-    TEXT_COLOR,
-    RED_DANGER,
-    BLUE_SAFE,
-    EXIT_GATE_COLOR,
-)
+from config import (WIDTH, HEIGHT, RED, BLUE, PURPLE, TEXT, TEXT_DIM, PANEL, PANEL_EDGE, EXIT,
+                    HAZARD, PLAYER, INTRO_TIME)
+from effects import blur, scale_color, mix, blit_glow
+
+WORD_COLORS = {"RED": RED, "BLUE": BLUE, "PURPLE": PURPLE, "DANGER": (255, 140, 150),
+               "SAFE": (160, 235, 255), "???": PURPLE}
+GLITCH_CHARS = "#@%&$!?/\\<>*"
+FONT_NAMES = "bahnschrift,segoeuisemibold,segoeui,montserrat,arialblack,helveticaneue,arial,dejavusans"
 
 
-class UIManager:
-    """Handles rendering of text, HUD, menus, and narrative screens."""
+def load_font(size, bold=True):
+    try:
+        f = pygame.font.SysFont(FONT_NAMES, size, bold=bold)
+        if f is not None:
+            return f
+    except Exception:
+        pass
+    return pygame.font.Font(None, int(size * 1.3))
 
+
+class Button:
+    def __init__(self, label, action, enabled=True):
+        self.label, self.action, self.enabled = label, action, enabled
+        self.rect = pygame.Rect(0, 0, 300, 50)
+
+
+class UI:
     def __init__(self):
-        self.fonts = {}
-        self._init_fonts()
-        self.hud_timer = 0.0
+        self.f_title = load_font(96)
+        self.f_big = load_font(40)
+        self.f_banner = load_font(30)
+        self.f_mid = load_font(26)
+        self.f_small = load_font(18, bold=False)
+        self.f_tiny = load_font(15, bold=False)
+        self._banner_cache = {}
+        self._title_cache = None
 
-    def _init_fonts(self):
-        """Initialize and cache modern fonts."""
-        pygame.font.init()
-        # Prefer monospace or clean sans fonts available on the system
-        preferred_fonts = ["consolas", "couriernew", "dejavusansmono", "lucidaconsole", "arial"]
-        chosen_font = None
-        for fn in preferred_fonts:
-            matched = pygame.font.match_font(fn)
-            if matched:
-                chosen_font = matched
-                break
-
-        try:
-            self.fonts["title"] = pygame.font.Font(chosen_font, 64) if chosen_font else pygame.font.SysFont("consolas", 64, bold=True)
-            self.fonts["subtitle"] = pygame.font.Font(chosen_font, 22) if chosen_font else pygame.font.SysFont("consolas", 22)
-            self.fonts["large"] = pygame.font.Font(chosen_font, 36) if chosen_font else pygame.font.SysFont("consolas", 36, bold=True)
-            self.fonts["medium"] = pygame.font.Font(chosen_font, 22) if chosen_font else pygame.font.SysFont("consolas", 22, bold=True)
-            self.fonts["small"] = pygame.font.Font(chosen_font, 16) if chosen_font else pygame.font.SysFont("consolas", 16)
-        except Exception:
-            self.fonts["title"] = pygame.font.Font(None, 64)
-            self.fonts["subtitle"] = pygame.font.Font(None, 24)
-            self.fonts["large"] = pygame.font.Font(None, 38)
-            self.fonts["medium"] = pygame.font.Font(None, 24)
-            self.fonts["small"] = pygame.font.Font(None, 18)
-
-    def render_glow_text(self, surface, text, font, pos, color, glow_color, center=False, glow_radius=4):
-        """Render text with an outer neon glow."""
-        base_surf = font.render(text, True, color)
-        w, h = base_surf.get_size()
-
-        glow_surf = pygame.Surface((w + glow_radius * 4, h + glow_radius * 4), pygame.SRCALPHA)
-        # Multi-layer glow
-        for r in range(glow_radius, 0, -1):
-            alpha = int(40 / r)
-            tint = (*glow_color[:3], alpha)
-            rendered_glow = font.render(text, True, tint)
-            glow_surf.blit(rendered_glow, (glow_radius * 2 - r, glow_radius * 2))
-            glow_surf.blit(rendered_glow, (glow_radius * 2 + r, glow_radius * 2))
-            glow_surf.blit(rendered_glow, (glow_radius * 2, glow_radius * 2 - r))
-            glow_surf.blit(rendered_glow, (glow_radius * 2, glow_radius * 2 + r))
-
-        glow_surf.blit(base_surf, (glow_radius * 2, glow_radius * 2))
-
+    # ------------------------------------------------------------ helpers
+    def text(self, surf, s, font, color, center=None, topleft=None, topright=None, alpha=255):
+        img = font.render(s, True, color)
+        if alpha < 255:
+            img.set_alpha(alpha)
+        r = img.get_rect()
         if center:
-            dest_x = pos[0] - glow_surf.get_width() // 2
-            dest_y = pos[1] - glow_surf.get_height() // 2
-        else:
-            dest_x = pos[0] - glow_radius * 2
-            dest_y = pos[1] - glow_radius * 2
+            r.center = center
+        elif topleft:
+            r.topleft = topleft
+        elif topright:
+            r.topright = topright
+        surf.blit(img, r)
+        return r
 
-        surface.blit(glow_surf, (dest_x, dest_y))
-        return pygame.Rect(dest_x, dest_y, glow_surf.get_width(), glow_surf.get_height())
+    def glow_text(self, surf, s, font, color, center, glow=0.6):
+        img = font.render(s, True, color)
+        r = img.get_rect(center=center)
+        pad = 24
+        g = pygame.Surface((r.w + pad * 2, r.h + pad * 2))
+        g.fill((0, 0, 0))
+        g.blit(font.render(s, True, scale_color(color, glow)), (pad, pad))
+        g = blur(g, 5)
+        surf.blit(g, (r.x - pad, r.y - pad), special_flags=pygame.BLEND_ADD)
+        surf.blit(img, r)
+        return r
 
-    def update(self, dt):
-        self.hud_timer += dt
+    def panel(self, surf, rect, alpha=210, edge=PANEL_EDGE, radius=14):
+        s = pygame.Surface(rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(s, PANEL + (alpha,), s.get_rect(), border_radius=radius)
+        pygame.draw.rect(s, edge + (255,), s.get_rect(), 1, border_radius=radius)
+        surf.blit(s, rect.topleft)
 
-    def draw_hud(self, surface, level_id, total_levels, deaths, rule_text, warning_msg, controls_swapped):
-        """Draw top banner with current instructions and stats."""
-        # Top banner background bar
-        bar_height = 48
-        bar_surf = pygame.Surface((SCREEN_WIDTH, bar_height), pygame.SRCALPHA)
-        bar_surf.fill((10, 12, 18, 220))
-        pygame.draw.line(bar_surf, (50, 60, 85, 180), (0, bar_height - 1), (SCREEN_WIDTH, bar_height - 1), 1)
-        surface.blit(bar_surf, (0, 0))
-
-        # Main Rule Text in center with neon styling
-        pulse = 0.5 + 0.5 * math.sin(self.hud_timer * 4.0)
-        glow_col = (int(100 + 50 * pulse), int(120 + 50 * pulse), 200)
-
-        # Parse rule text to highlight RED and BLUE dynamically
-        # Standard: RED = DANGER    BLUE = SAFE
-        self.render_glow_text(
-            surface,
-            rule_text,
-            self.fonts["medium"],
-            (SCREEN_WIDTH // 2, bar_height // 2),
-            TEXT_COLOR,
-            glow_col,
-            center=True,
-            glow_radius=3,
-        )
-
-        # Level Indicator on Left
-        lvl_str = f"TEST: {level_id:02d} / {total_levels:02d}"
-        self.render_glow_text(
-            surface,
-            lvl_str,
-            self.fonts["small"],
-            (24, bar_height // 2),
-            (160, 200, 255),
-            (30, 80, 160),
-            center=False,
-            glow_radius=2,
-        )
-
-        # Deaths Counter on Right
-        deaths_str = f"DEATHS: {deaths}"
-        right_surf = self.fonts["small"].render(deaths_str, True, (255, 120, 140))
-        rx = SCREEN_WIDTH - right_surf.get_width() - 24
-        self.render_glow_text(
-            surface,
-            deaths_str,
-            self.fonts["small"],
-            (rx, bar_height // 2),
-            (255, 120, 140),
-            (150, 30, 50),
-            center=False,
-            glow_radius=2,
-        )
-
-        # Vague lie warning banner if triggered
-        if warning_msg:
-            warn_pulse = abs(math.sin(self.hud_timer * 8.0))
-            w_color = (255, int(220 * warn_pulse), int(60 * warn_pulse))
-            w_box = pygame.Surface((SCREEN_WIDTH, 30), pygame.SRCALPHA)
-            w_box.fill((30, 10, 15, 180))
-            surface.blit(w_box, (0, bar_height))
-            self.render_glow_text(
-                surface,
-                f">> {warning_msg} <<",
-                self.fonts["small"],
-                (SCREEN_WIDTH // 2, bar_height + 15),
-                w_color,
-                (200, 50, 50),
-                center=True,
-                glow_radius=2,
-            )
-
-        # Controls swapped subtle icon if active
-        if controls_swapped:
-            warn_text = "[CONTROLS INVERTED]"
-            c_surf = self.fonts["small"].render(warn_text, True, (255, 180, 50))
-            surface.blit(c_surf, (24, bar_height + 8))
-
-    def draw_menu(self, surface, selected_idx, timer):
-        """Render the cybernetic main menu."""
-        # Main Title with chromatic glitch shadow
-        title = "CHROMA LIE"
-        cx = SCREEN_WIDTH // 2
-        cy = 160
-
-        # Background chromatic shadow
-        self.render_glow_text(surface, title, self.fonts["title"], (cx + 3, cy), RED_DANGER, (150, 0, 50), center=True)
-        self.render_glow_text(surface, title, self.fonts["title"], (cx - 3, cy), BLUE_SAFE, (0, 100, 180), center=True)
-        self.render_glow_text(surface, title, self.fonts["title"], (cx, cy), (255, 255, 255), (100, 180, 255), center=True, glow_radius=6)
-
-        # Subtitle
-        sub_text = "TRUST NOTHING. OBSERVE EVERYTHING."
-        self.render_glow_text(surface, sub_text, self.fonts["subtitle"], (cx, cy + 65), (180, 190, 220), (50, 60, 100), center=True)
-
-        # Options
-        options = ["BEGIN EXPERIMENT", "CONTROLS & MANUAL", "QUIT"]
-        start_y = 310
-        spacing = 54
-
-        for idx, opt in enumerate(options):
-            is_selected = (idx == selected_idx)
-            y_pos = start_y + idx * spacing
-
-            if is_selected:
-                # Pulsing selection arrow and box
-                p = 0.5 + 0.5 * math.sin(timer * 6.0)
-                box_w = 340
-                box_h = 42
-                box_surf = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
-                box_surf.fill((30, 45, 75, int(100 + 60 * p)))
-                pygame.draw.rect(box_surf, (*BLUE_SAFE[:3], int(150 + 100 * p)), (0, 0, box_w, box_h), 2, border_radius=4)
-                surface.blit(box_surf, (cx - box_w // 2, y_pos - box_h // 2))
-
-                text_str = f">  {opt}  <"
-                self.render_glow_text(
-                    surface,
-                    text_str,
-                    self.fonts["medium"],
-                    (cx, y_pos),
-                    (255, 255, 255),
-                    BLUE_SAFE,
-                    center=True,
-                    glow_radius=4,
-                )
-            else:
-                self.render_glow_text(
-                    surface,
-                    opt,
-                    self.fonts["medium"],
-                    (cx, y_pos),
-                    (130, 140, 170),
-                    (40, 50, 80),
-                    center=True,
-                    glow_radius=1,
-                )
-
-        # Footer notes
-        footer = "UP / DOWN: SELECT    ENTER: CONFIRM    SPACE: JUMP"
-        f_surf = self.fonts["small"].render(footer, True, (80, 95, 130))
-        surface.blit(f_surf, (cx - f_surf.get_width() // 2, SCREEN_HEIGHT - 40))
-
-    def draw_how_to_play(self, surface):
-        """Render controls and gameplay rules dialog."""
-        # Modal overlay
-        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-        overlay.fill((12, 14, 20, 240))
-        surface.blit(overlay, (0, 0))
-
-        cx = SCREEN_WIDTH // 2
-        cy = 80
-        self.render_glow_text(surface, "OPERATIONAL MANUAL", self.fonts["large"], (cx, cy), BLUE_SAFE, (40, 100, 200), center=True)
-
-        lines = [
-            ("CONTROLS", (100, 220, 255)),
-            ("ARROW KEYS / WASD : Move left & right", TEXT_COLOR),
-            ("SPACE : Jump across platforms and hazards", TEXT_COLOR),
-            ("SHIFT : Quick dash through tight gaps", TEXT_COLOR),
-            ("R : Quick restart level upon failure", TEXT_COLOR),
-            ("ESC : Return to title menu", TEXT_COLOR),
-            ("", TEXT_COLOR),
-            ("CRITICAL WARNING", RED_DANGER),
-            ("- Initial directive: RED = DANGER, BLUE = SAFE.", TEXT_COLOR),
-            ("- As testing progresses, directives may not remain factual.", TEXT_COLOR),
-            ("- Controls and color properties will be distorted without warning.", TEXT_COLOR),
-            ("- Reach the green pulsating EXIT GATE to proceed.", EXIT_GATE_COLOR),
-            ("", TEXT_COLOR),
-            ("PRESS ENTER OR ESCAPE TO RETURN", (180, 255, 200)),
-        ]
-
-        start_y = 140
-        for text, col in lines:
-            if text.startswith("CONTROLS") or text.startswith("CRITICAL"):
-                self.render_glow_text(surface, text, self.fonts["medium"], (cx, start_y), col, (50, 80, 120), center=True)
-            elif text.startswith("PRESS"):
-                self.render_glow_text(surface, text, self.fonts["medium"], (cx, start_y + 10), col, (40, 120, 80), center=True)
-            else:
-                self.render_glow_text(surface, text, self.fonts["small"], (cx, start_y), col, (20, 30, 50), center=True)
-            start_y += 32
-
-    def draw_narrative_ending(self, surface, total_deaths, timer):
-        """Render final philosophical ending sequence."""
-        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-        overlay.fill((10, 12, 18, 245))
-        surface.blit(overlay, (0, 0))
-
-        cx = SCREEN_WIDTH // 2
-        self.render_glow_text(
-            surface,
-            "EXPERIMENT ARCHIVED",
-            self.fonts["large"],
-            (cx, 110),
-            EXIT_GATE_COLOR,
-            (40, 180, 100),
-            center=True,
-            glow_radius=5,
-        )
-
-        lines = [
-            "You followed the rules until they failed you.",
-            "You trusted the signs until they lied.",
-            "In the end, you survived not by obeying instructions,",
-            "but by questioning every single certainty.",
-            "",
-            f"TOTAL SYSTEM FAILURES (DEATHS): {total_deaths}",
-            "",
-            "PRESS [SPACE] OR [ENTER] TO RETURN TO REALITY",
-        ]
-
-        curr_y = 190
-        for idx, line in enumerate(lines):
-            # Gradual reveal based on timer
-            revealed_threshold = idx * 0.8
-            if timer < revealed_threshold:
+    # ------------------------------------------------------------ instruction banner
+    def _render_banner(self, text, cache=True):
+        """Render the instruction with colored keywords and a soft glow. Cached per text."""
+        if cache and text in self._banner_cache:
+            return self._banner_cache[text]
+        parts = []
+        for word in text.split(" "):
+            if word == "":
+                parts.append((" ", TEXT))
                 continue
+            parts.append((word + " ", WORD_COLORS.get(word, TEXT)))
+        imgs = [self.f_banner.render(w, True, c) for w, c in parts]
+        w = sum(i.get_width() for i in imgs)
+        h = max(i.get_height() for i in imgs)
+        pad = 22
+        base = pygame.Surface((w + pad * 2, h + pad * 2), pygame.SRCALPHA)
+        glow = pygame.Surface(base.get_size())
+        glow.fill((0, 0, 0))
+        x = pad
+        for img, (wd, c) in zip(imgs, parts):
+            base.blit(img, (x, pad))
+            glow.blit(self.f_banner.render(wd, True, scale_color(c, 0.55)), (x, pad))
+            x += img.get_width()
+        if not cache:
+            return base, None
+        result = (base, blur(glow, 5))
+        self._banner_cache[text] = result
+        return result
 
-            if "TOTAL SYSTEM" in line:
-                self.render_glow_text(surface, line, self.fonts["medium"], (cx, curr_y), RED_DANGER, (150, 40, 60), center=True)
-            elif "PRESS" in line:
-                pulse = 0.5 + 0.5 * math.sin(timer * 5.0)
-                p_col = (int(180 + 75 * pulse), 255, int(180 + 75 * pulse))
-                self.render_glow_text(surface, line, self.fonts["medium"], (cx, curr_y + 20), p_col, (40, 160, 80), center=True)
+    def draw_banner(self, surf, text, glitch, t, cycle_progress=None):
+        base, glow = self._render_banner(text)
+        cx = WIDTH // 2
+        rect = base.get_rect(center=(cx, 40))
+        box = pygame.Rect(0, 0, rect.w - 10, 48)
+        box.center = (cx, 40)
+        self.panel(surf, box, 200, radius=24)
+        if glitch > 0:
+            # chromatic split + scrambled characters: something just changed
+            scrambled = "".join(random.choice(GLITCH_CHARS) if (ch != " " and random.random() < 0.25) else ch
+                                for ch in text)
+            gb, _ = self._render_banner(scrambled, cache=False)
+            dx = random.randint(3, 9)
+            red = gb.copy()
+            red.fill((255, 0, 0, 255), special_flags=pygame.BLEND_RGBA_MULT)
+            cyan = gb.copy()
+            cyan.fill((0, 255, 255, 255), special_flags=pygame.BLEND_RGBA_MULT)
+            r2 = gb.get_rect(center=(cx, 40))
+            surf.blit(red, r2.move(-dx, random.randint(-2, 2)))
+            surf.blit(cyan, r2.move(dx, random.randint(-2, 2)))
+        else:
+            surf.blit(glow, rect, special_flags=pygame.BLEND_ADD)
+            surf.blit(base, rect)
+        if cycle_progress is not None:
+            bar = pygame.Rect(box.x + 24, box.bottom + 6, box.w - 48, 4)
+            pygame.draw.rect(surf, PANEL_EDGE, bar, border_radius=2)
+            fill = bar.copy()
+            fill.w = int(bar.w * cycle_progress)
+            col = HAZARD if cycle_progress > 0.82 else TEXT_DIM
+            pygame.draw.rect(surf, col, fill, border_radius=2)
+
+    # ------------------------------------------------------------ HUD
+    def draw_hud(self, surf, level_def, deaths, t, intro):
+        # top-right: level + deaths
+        r = pygame.Rect(WIDTH - 178, 16, 162, 48)
+        self.panel(surf, r, 190, radius=12)
+        self.text(surf, "LEVEL", self.f_tiny, TEXT_DIM, topleft=(r.x + 14, r.y + 7))
+        self.text(surf, "{:02d}/15".format(level_def["id"]), self.f_mid, TEXT, topleft=(r.x + 14, r.y + 18))
+        self.text(surf, "DEATHS", self.f_tiny, TEXT_DIM, topright=(r.right - 14, r.y + 7))
+        self.text(surf, str(deaths), self.f_mid, RED if deaths else TEXT, topright=(r.right - 14, r.y + 18))
+        # top-left: level title
+        self.text(surf, level_def["title"], self.f_small, TEXT_DIM, topleft=(20, 22))
+        # bottom hint
+        self.text(surf, "R restart   ESC pause   F11 fullscreen", self.f_tiny, scale_color(TEXT_DIM, 0.8),
+                  topleft=(18, HEIGHT - 24))
+        # intro card
+        if intro > 0:
+            k = min(1.0, intro / 0.5, (INTRO_TIME - intro) / 0.25 + 0.001)
+            a = int(255 * max(0.0, min(1.0, k)))
+            card = pygame.Surface((WIDTH, 120), pygame.SRCALPHA)
+            card.fill((10, 12, 18, int(a * 0.75)))
+            surf.blit(card, (0, HEIGHT // 2 - 60))
+            self.text(surf, "LEVEL {:02d}".format(level_def["id"]), self.f_small, TEXT_DIM,
+                      center=(WIDTH // 2, HEIGHT // 2 - 26), alpha=a)
+            self.text(surf, level_def["title"], self.f_big, TEXT, center=(WIDTH // 2, HEIGHT // 2 + 12), alpha=a)
+
+    def draw_message(self, surf, message, timer, t):
+        if not message:
+            return
+        a = int(255 * max(0.0, min(1.0, timer / 0.5, 1.0)))
+        jitter = (random.randint(-1, 1), random.randint(-1, 1)) if random.random() < 0.15 else (0, 0)
+        self.text(surf, message, self.f_big, (200, 205, 225), center=(WIDTH // 2 + jitter[0], 150 + jitter[1]), alpha=a)
+
+    # ------------------------------------------------------------ menus
+    def layout_buttons(self, buttons, top, width=320, height=50, gap=12):
+        for i, b in enumerate(buttons):
+            b.rect = pygame.Rect(0, 0, width, height)
+            b.rect.center = (WIDTH // 2, top + i * (height + gap))
+
+    def draw_buttons(self, surf, buttons, selected, t):
+        for i, b in enumerate(buttons):
+            sel = i == selected and b.enabled
+            edge = mix(BLUE, (255, 255, 255), 0.2) if sel else PANEL_EDGE
+            if sel:
+                blit_glow(surf, b.rect.center, 90, BLUE, 0.25)
+            self.panel(surf, b.rect, 235 if sel else 180, edge=edge, radius=12)
+            col = TEXT if b.enabled else scale_color(TEXT_DIM, 0.6)
+            self.text(surf, b.label, self.f_mid, col, center=b.rect.center)
+            if sel:
+                pygame.draw.rect(surf, BLUE, (b.rect.x + 14, b.rect.centery - 6, 6, 12), border_radius=2)
+
+    def draw_title(self, surf, t, y=160):
+        """'CHROMA LIE' with a living chromatic split that sometimes glitches hard."""
+        word = "CHROMA LIE"
+        img = self.f_title.render(word, True, TEXT)
+        r = img.get_rect(center=(WIDTH // 2, y))
+        hard = (t % 3.7) < 0.18
+        dx = 3 + (random.randint(4, 14) if hard else int(2 * math.sin(t * 2)))
+        red = self.f_title.render(word, True, RED)
+        blue = self.f_title.render(word, True, BLUE)
+        glow = pygame.Surface((r.w + 60, r.h + 60))
+        glow.fill((0, 0, 0))
+        glow.blit(self.f_title.render(word, True, (90, 90, 130)), (30, 30))
+        surf.blit(blur(glow, 6), (r.x - 30, r.y - 30), special_flags=pygame.BLEND_ADD)
+        surf.blit(red, r.move(-dx, 0), special_flags=pygame.BLEND_ADD)
+        surf.blit(blue, r.move(dx, 0), special_flags=pygame.BLEND_ADD)
+        surf.blit(img, r, special_flags=pygame.BLEND_ADD if hard else 0)
+
+    def draw_level_select(self, surf, unlocked, selected, levels, t, best):
+        self.text(surf, "SELECT LEVEL", self.f_big, TEXT, center=(WIDTH // 2, 80))
+        cells = []
+        size, gap = 104, 20
+        total_w = 5 * size + 4 * gap
+        x0 = (WIDTH - total_w) // 2
+        for i in range(15):
+            c, r = i % 5, i // 5
+            rect = pygame.Rect(x0 + c * (size + gap), 150 + r * (size + gap), size, size)
+            cells.append(rect)
+            open_ = i < unlocked
+            sel = i == selected
+            edge = BLUE if sel else (PANEL_EDGE if open_ else (40, 44, 60))
+            if sel:
+                blit_glow(surf, rect.center, 80, BLUE, 0.3)
+            self.panel(surf, rect, 230 if open_ else 120, edge=edge, radius=14)
+            if open_:
+                self.text(surf, "{:02d}".format(i + 1), self.f_big, TEXT, center=(rect.centerx, rect.centery - 10))
+                label = "{} deaths".format(best[str(i + 1)]) if str(i + 1) in best else "new"
+                self.text(surf, label, self.f_tiny, TEXT_DIM, center=(rect.centerx, rect.centery + 28))
             else:
-                self.render_glow_text(surface, line, self.fonts["subtitle"], (cx, curr_y), TEXT_COLOR, (40, 50, 80), center=True)
+                lock = pygame.Rect(0, 0, 22, 18)
+                lock.center = (rect.centerx, rect.centery + 6)
+                pygame.draw.rect(surf, (70, 76, 100), lock, border_radius=3)
+                pygame.draw.arc(surf, (70, 76, 100), (lock.x + 3, lock.y - 12, 16, 20), 0, math.pi, 3)
+        name = levels[selected]["title"] if selected < unlocked else "LOCKED"
+        self.text(surf, name, self.f_mid, TEXT, center=(WIDTH // 2, 540))
+        self.text(surf, "arrows to choose   ENTER to play   ESC back", self.f_small, TEXT_DIM,
+                  center=(WIDTH // 2, 590))
+        return cells
 
-            curr_y += 38
+    def draw_how_to(self, surf, t):
+        self.text(surf, "HOW TO PLAY", self.f_big, TEXT, center=(WIDTH // 2, 90))
+        box = pygame.Rect(WIDTH // 2 - 330, 140, 660, 380)
+        self.panel(surf, box, 210)
+        lines = [
+            ("ARROWS / A D", "move"),
+            ("SPACE", "jump (hold for higher)"),
+            ("R", "restart level"),
+            ("ESC", "pause"),
+            ("F11", "toggle fullscreen"),
+        ]
+        for i, (k, v) in enumerate(lines):
+            y = box.y + 36 + i * 40
+            self.text(surf, k, self.f_mid, BLUE, topleft=(box.x + 50, y))
+            self.text(surf, v, self.f_mid, TEXT, topleft=(box.x + 300, y))
+        tips = ["Reach the glowing gate. Touch anything deadly and you restart instantly.",
+                "Amber things are always deadly. Colors mean what the screen says... usually.",
+                "The world never lies as well as the words do. Watch closely."]
+        for i, s in enumerate(tips):
+            self.text(surf, s, self.f_small, TEXT_DIM, center=(WIDTH // 2, box.y + 262 + i * 30))
+        self.text(surf, "ESC / ENTER to go back", self.f_small, TEXT_DIM, center=(WIDTH // 2, 580))
+
+    def draw_end(self, surf, t, deaths, elapsed):
+        lines = ["No rule was ever absolute.",
+                 "The text lied. The colors lied. Your eyes never did.",
+                 "Trust what you observe over what you are told."]
+        self.draw_title(surf, t, 130)
+        for i, s in enumerate(lines):
+            start = 0.6 + i * 1.3
+            if elapsed < start:
+                break
+            n = int((elapsed - start) * 40)
+            shown = s[:n]
+            self.text(surf, shown, self.f_mid, TEXT if i < 2 else EXIT, center=(WIDTH // 2, 290 + i * 48))
+        if elapsed > 4.8:
+            self.text(surf, "total deaths: {}".format(deaths), self.f_small, TEXT_DIM, center=(WIDTH // 2, 470))
+            a = int(160 + 95 * math.sin(t * 3))
+            self.text(surf, "press ENTER", self.f_small, (a, a, a), center=(WIDTH // 2, 540))

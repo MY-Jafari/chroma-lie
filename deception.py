@@ -1,199 +1,135 @@
-"""Deception system - manages rule changes and lies in Chroma Lie."""
+"""
+deception.py - the lying brain of Chroma Lie.
 
-import random
-from config import *
+Holds the CURRENT real rule set and the (possibly lying) instruction text.
+Rule changes are fired by zone triggers, timers, or a periodic cycle (level 14)
+and are revealed silently, with a glitch, or with a vague message.
+"""
+from config import RULE_GRACE, GLITCH_DURATION, MESSAGE_TIME
 
-class DeceptionManager:
-    """Central manager for all deception mechanics."""
+DEFAULT_RULES = {
+    "red_meaning": "danger",
+    "blue_meaning": "safe",
+    "purple_meaning": "safe",
+    "controls_swapped": False,
+    "hidden_rule_active": None,
+}
 
-    def __init__(self):
-        self.current_rules = {
-            "red_meaning": "danger",
-            "blue_meaning": "safe",
-            "controls_swapped": False,
-            "hidden_rule_active": None,
-            "hidden_rule_params": {}
-        }
-        self.displayed_rules = {
-            "red_meaning": "danger",
-            "blue_meaning": "safe"
-        }
-        self.glitch_timer = 0.0
-        self.glitch_active = False
+TILE_TO_RULE = {"R": "red_meaning", "B": "blue_meaning", "P": "purple_meaning"}
+
+
+class DeceptionSystem:
+    def __init__(self, level_def):
+        self.rules = dict(DEFAULT_RULES)
+        self.rules.update(level_def.get("initial_rules", {}))
+        self.display_text = level_def.get("instruction", "RED = DANGER   BLUE = SAFE")
+        self.events = [dict(e, fired=False) for e in level_def.get("rule_change", [])]
+        self.cycle = level_def.get("cycle")
+        self.cycle_index = 0
+        self.cycle_clock = 0.0
+        self.time = 0.0
+        self.grace = 0.0            # colored tiles are harmless while > 0
+        self.text_glitch = 0.0      # seconds of glitch left on the instruction text
+        self.flicker_truth = False  # lying text briefly shows the truth now and then
+        self.message = None
         self.message_timer = 0.0
-        self.message_text = ""
-        self.level_rule_changes = []
-        self.change_history = []
+        self._pending = []          # [seconds_left, event] waiting for their pre-glitch
+        self.signals = []           # effect requests consumed by main.py: "glitch", "blip"
 
-    def reset_for_level(self, level_id, rule_change_data=None):
-        """Reset rules for a new level, applying any scripted changes."""
-        self.current_rules = {
-            "red_meaning": "danger",
-            "blue_meaning": "safe",
-            "controls_swapped": False,
-            "hidden_rule_active": None,
-            "hidden_rule_params": {}
-        }
-        self.displayed_rules = {
-            "red_meaning": "danger",
-            "blue_meaning": "safe"
-        }
-        self.glitch_timer = 0.0
-        self.glitch_active = False
-        self.message_timer = 0.0
-        self.message_text = ""
+    # ------------------------------------------------------------ queries
+    def is_danger(self, tile_char):
+        """True if the tile is deadly under the CURRENT (real) rule."""
+        key = TILE_TO_RULE.get(tile_char)
+        return key is not None and self.rules[key] == "danger"
 
-        if rule_change_data:
-            self.level_rule_changes = rule_change_data if isinstance(rule_change_data, list) else [rule_change_data]
-        else:
-            self.level_rule_changes = []
+    def is_lethal(self, tile_char):
+        """Deadly right now (respects the short grace window after a change)."""
+        return self.grace <= 0 and self.is_danger(tile_char)
 
-    def apply_scripted_change(self, change_data):
-        """Apply a scripted rule change from level data."""
-        change_type = change_data.get("type", "")
-        reveal = change_data.get("reveal", "silent")
-        custom_msg = change_data.get("msg", None)
+    @property
+    def controls_swapped(self):
+        return self.rules["controls_swapped"]
 
-        if change_type == "swap_colors":
-            self._swap_color_meanings(reveal, custom_msg)
-        elif change_type == "swap_controls":
-            self._swap_controls(reveal, custom_msg)
-        elif change_type == "hidden_rule":
-            self._activate_hidden_rule(change_data.get("rule"), reveal, custom_msg)
-        elif change_type == "glitch_text":
-            self._trigger_text_glitch(reveal, custom_msg)
+    def truth_text(self):
+        return "RED = {}   BLUE = {}".format(self.rules["red_meaning"].upper(),
+                                            self.rules["blue_meaning"].upper())
 
-        self.change_history.append({
-            "level": len(self.change_history) + 1,
-            "type": change_type,
-            "reveal": reveal
-        })
+    def shown_text(self):
+        """Text the HUD displays. Lying text flickers to the truth for a split second."""
+        if self.flicker_truth and (self.time % 2.6) < 0.12:
+            return self.truth_text()
+        return self.display_text
 
-    def _swap_color_meanings(self, reveal="silent", custom_msg=None):
-        """Swap the meaning of red and blue tiles."""
-        self.current_rules["red_meaning"], self.current_rules["blue_meaning"] = \
-            self.current_rules["blue_meaning"], self.current_rules["red_meaning"]
-        self._trigger_glitch(reveal, custom_msg)
+    def cycle_progress(self):
+        if not self.cycle:
+            return None
+        return min(1.0, self.cycle_clock / self.cycle["period"])
 
-    def _swap_controls(self, reveal="silent", custom_msg=None):
-        """Swap left/right controls."""
-        self.current_rules["controls_swapped"] = not self.current_rules["controls_swapped"]
-        self._trigger_glitch(reveal, custom_msg)
-
-    def _activate_hidden_rule(self, rule_name, reveal="silent", custom_msg=None):
-        """Activate a hidden rule."""
-        self.current_rules["hidden_rule_active"] = rule_name
-        self.current_rules["hidden_rule_params"] = {}
-        self._trigger_glitch(reveal, custom_msg)
-
-    def _trigger_text_glitch(self, reveal="silent", custom_msg=None):
-        """Trigger a text glitch effect on the displayed rules."""
-        self.displayed_rules["red_meaning"] = random.choice(["danger", "safe", "???", "lie"])
-        self.displayed_rules["blue_meaning"] = random.choice(["safe", "danger", "???", "lie"])
-        self._trigger_glitch(reveal, custom_msg)
-
-    def _trigger_glitch(self, reveal_type, custom_msg=None):
-        """Trigger visual glitch effect based on reveal type."""
-        self.glitch_timer = GLITCH_DURATION
-        self.glitch_active = True
-
-        if reveal_type == "message":
-            if custom_msg:
-                self.message_text = custom_msg
-            else:
-                messages = [
-                    "Are you sure?",
-                    "Rules still the same?",
-                    "Trust your eyes?",
-                    "Red means stop... or does it?",
-                    "Memory is unreliable.",
-                    "The display lies."
-                ]
-                self.message_text = random.choice(messages)
-            self.message_timer = 2.5
-        elif reveal_type == "subtle":
-            # Subtle visual hint: flash the rule text area
-            self.message_text = "⚠"
-            self.message_timer = 0.8
-
-    def maybe_random_change(self, level_id, probability=0.15):
-        """Randomly apply a deception change (for later levels)."""
-        if random.random() < probability:
-            change_type = random.choice(["swap_colors", "swap_controls", "hidden_rule"])
-            if change_type == "hidden_rule":
-                rule = random.choice(["purple_deadly", "yellow_safe_when_moving", "safe_only_while_jumping"])
-                self._activate_hidden_rule(rule, "silent")
-            elif change_type == "swap_colors":
-                self._swap_color_meanings("silent")
-            else:
-                self._swap_controls("silent")
-
-    def update(self, dt):
-        """Update timers."""
-        if self.glitch_timer > 0:
-            self.glitch_timer -= dt
-            if self.glitch_timer <= 0:
-                self.glitch_active = False
-                # Restore displayed rules to match current (unless text glitch active)
-                if self.current_rules.get("hidden_rule_active") != "glitch_text":
-                    self.displayed_rules["red_meaning"] = self.current_rules["red_meaning"]
-                    self.displayed_rules["blue_meaning"] = self.current_rules["blue_meaning"]
-
+    # ------------------------------------------------------------ update
+    def update(self, dt, player_rect):
+        self.time += dt
+        self.grace = max(0.0, self.grace - dt)
+        self.text_glitch = max(0.0, self.text_glitch - dt)
         if self.message_timer > 0:
             self.message_timer -= dt
             if self.message_timer <= 0:
-                self.message_text = ""
+                self.message = None
 
-    def get_tile_safety(self, tile_color):
-        """Check if a tile color is safe or dangerous based on current rules."""
-        # Hidden rules override everything
-        if self.current_rules["hidden_rule_active"] == "purple_deadly" and tile_color == "purple":
-            return False
-        if self.current_rules["hidden_rule_active"] == "yellow_safe_when_moving" and tile_color == "yellow":
-            return self.current_rules["hidden_rule_params"].get("player_moving", False)
-        if self.current_rules["hidden_rule_active"] == "safe_only_while_jumping" and tile_color in ["red", "blue"]:
-            return self.current_rules["hidden_rule_params"].get("player_jumping", False)
+        for ev in self.events:
+            if not ev["fired"] and self._triggered(ev["trigger"], player_rect):
+                ev["fired"] = True
+                pre = ev.get("pre_glitch", 0)
+                if pre > 0:                       # subtle tell BEFORE the lie happens
+                    self.text_glitch = max(self.text_glitch, pre)
+                    self._pending.append([pre, ev])
+                else:
+                    self._apply(ev)
 
-        # Standard color rules
-        if tile_color == "red":
-            return self.current_rules["red_meaning"] == "safe"
-        elif tile_color == "blue":
-            return self.current_rules["blue_meaning"] == "safe"
-        elif tile_color == "purple":
-            return self.current_rules.get("purple_meaning", "danger") == "safe"
-        elif tile_color == "yellow":
-            return self.current_rules.get("yellow_meaning", "danger") == "safe"
-        return True  # Default safe for unknown colors
+        for item in self._pending[:]:
+            item[0] -= dt
+            if item[0] <= 0:
+                self._pending.remove(item)
+                self._apply(item[1])
 
-    def get_displayed_rule_text(self):
-        """Get the text to display for rules (may be glitched)."""
-        return f"RED = {self.displayed_rules['red_meaning'].upper()}    BLUE = {self.displayed_rules['blue_meaning'].upper()}"
+        if self.cycle:
+            self._update_cycle(dt)
 
-    def get_glitch_offset(self):
-        """Get current glitch offset for rendering."""
-        if not self.glitch_active or self.glitch_timer <= 0:
-            return (0, 0)
-        # Oscillating offset based on remaining time
-        import math
-        t = self.glitch_timer / GLITCH_DURATION
-        offset = int(GLITCH_INTENSITY * math.sin(t * 20) * t)
-        return (offset, 0)
+    def _triggered(self, trig, player_rect):
+        if trig["type"] == "time":
+            return self.time >= trig["t"]
+        if trig["type"] == "zone":
+            x, y, w, h = trig["rect"]
+            return player_rect.colliderect((x, y, w, h))
+        return False
 
-    def get_camera_shake(self):
-        """Get camera shake offset."""
-        if not self.glitch_active or self.glitch_timer > GLITCH_DURATION - CAMERA_SHAKE_DURATION:
-            import random
-            return (random.randint(-CAMERA_SHAKE_INTENSITY, CAMERA_SHAKE_INTENSITY),
-                    random.randint(-CAMERA_SHAKE_INTENSITY, CAMERA_SHAKE_INTENSITY))
-        return (0, 0)
+    def _apply(self, ev):
+        self.rules.update(ev.get("changes", {}))
+        if ev.get("changes"):
+            self.grace = RULE_GRACE
+        if "display" in ev:
+            self.display_text = ev["display"]
+        if ev.get("flicker_truth"):
+            self.flicker_truth = True
+        method = ev.get("method", "silent")
+        if method == "glitch":
+            self.signals.append("glitch")
+            self.text_glitch = max(self.text_glitch, GLITCH_DURATION)
+        elif method == "vague_message":
+            self.message = ev.get("message", "are you sure?")
+            self.message_timer = MESSAGE_TIME
+        # "silent": nothing at all. Only the world itself tells the truth.
 
-    def set_player_state(self, moving=False, jumping=False):
-        """Update hidden rule parameters based on player state."""
-        if self.current_rules["hidden_rule_active"] == "yellow_safe_when_moving":
-            self.current_rules["hidden_rule_params"]["player_moving"] = moving
-        if self.current_rules["hidden_rule_active"] == "safe_only_while_jumping":
-            self.current_rules["hidden_rule_params"]["player_jumping"] = jumping
-
-
-# Global instance
-deception = DeceptionManager()
+    def _update_cycle(self, dt):
+        period, warn = self.cycle["period"], self.cycle["warn"]
+        before = self.cycle_clock
+        self.cycle_clock += dt
+        if before < period - warn <= self.cycle_clock:
+            self.text_glitch = max(self.text_glitch, warn)      # fair warning
+        if self.cycle_clock >= period:
+            self.cycle_clock -= period
+            self.cycle_index = (self.cycle_index + 1) % len(self.cycle["states"])
+            state = self.cycle["states"][self.cycle_index]
+            self.rules.update(state["changes"])
+            self.display_text = state.get("display", self.display_text)
+            self.grace = RULE_GRACE
+            self.signals.append("blip")
